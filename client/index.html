@@ -1,0 +1,33 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Easy Apply – Local</title>
+    <link rel="stylesheet" href="/styles.css" />
+</head>
+
+<body>
+    <main>
+        <h1>Easy Apply (local)</h1>
+        <p>Paste job URLs (one per line), choose options, then click Start. The headed browser will process them
+            sequentially.</p>
+
+        <textarea id="urls" placeholder="https://example.com/job/1
+https://boards.greenhouse.io/acme/jobs/123
+https://jobs.lever.co/acme/456"></textarea>
+
+        <div class="actions">
+            <label style="display:flex; align-items:center; gap:8px;">
+                <input type="checkbox" id="autoSubmit" />
+                Auto-click Submit / Apply
+            </label>
+
+            <button id="start">Start</button>
+            <span id="status"></span>
+        </div>
+    </main>
+    <script src="/app.js"></script>
+</body>
+
+</html>

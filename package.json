@@ -1,0 +1,17 @@
+{
+    "name": "jobbot",
+    "version": "1.0.0",
+    "description": "JobBot application",
+    "main": "server/server.mjs",
+    "type": "module",
+    "scripts": {
+        "start": "node server/server.mjs",
+        "dev": "node server/runner.mjs"
+    },
+    "dependencies": {
+        "express": "^4.21.2"
+    },
+    "devDependencies": {
+        "playwright": "^1.40.0"
+    }
+}

@@ -1,0 +1,12 @@
+{
+    "firstName": "Nidaa",
+    "lastName": "Mungloo",
+    "email": "nidaa.mungloo@gmail.com",
+    "phone": "+49 157 3719 4363",
+    "location": "Berlin, Germany",
+    "salary": "Flexible",
+    "resumePath": "./config/NidaaMunglooResume.pdf",
+    "linkedin": "https://www.linkedin.com/in/nidaa-mungloo/",
+    "website": "https://www.nidaamungloo.com/",
+    "github": "https://github.com/nida28"
+}
