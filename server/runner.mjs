@@ -1,4 +1,9 @@
-// server/runner.mjs — refactored for label-first detection, clarity, and robust logging
+/**
+ * JobBot Runner - Automated job application form filler
+ * 
+ * This module handles the automated filling of job application forms across
+ * various platforms (LinkedIn, Greenhouse, Lever, Workday, etc.)
+ */
 
 import { chromium } from 'playwright';
 import { promises as fs } from 'node:fs';
@@ -6,6 +11,7 @@ import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import crypto from 'node:crypto';
 
+// Path configuration
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -13,30 +19,41 @@ const CONFIG_PATH = resolve(__dirname, '..', 'config', 'user.json');
 const OUT_DIR = resolve(__dirname, '..', 'output');
 const CSV_PATH = resolve(OUT_DIR, 'applied.csv');
 
-const log = (...a) => console.log('[easyapply]', ...a);
+// Logging utility
+const log = (...args) => console.log('[easyapply]', ...args);
 
-/* ------------------------------- boot & logging ------------------------------ */
+// ============================================================================
+// FILE MANAGEMENT & LOGGING
+// ============================================================================
 
+/**
+ * Ensures output directory and CSV file exist with proper headers
+ */
 async function ensureOutFiles() {
   await fs.mkdir(OUT_DIR, { recursive: true }).catch(() => { });
-  try { await fs.access(CSV_PATH); }
-  catch {
-    await fs.writeFile(
-      CSV_PATH,
-      'version,timestamp_start,timestamp_end,status,company,job_title,source,url,resume_used,notes,job_id\n',
-      'utf8'
-    );
+
+  try {
+    await fs.access(CSV_PATH);
+  } catch {
+    const csvHeader = 'version,timestamp_start,timestamp_end,status,company,job_title,source,url,resume_used,notes,job_id\n';
+    await fs.writeFile(CSV_PATH, csvHeader, 'utf8');
   }
 }
 
-const csvEsc = s => {
-  const v = String(s ?? '');
-  return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+/**
+ * Escapes CSV values to prevent injection and formatting issues
+ */
+const escapeCsvValue = (value) => {
+  const stringValue = String(value ?? '');
+  return /[",\n]/.test(stringValue) ? `"${stringValue.replace(/"/g, '""')}"` : stringValue;
 };
 
+/**
+ * Appends a job application record to the CSV file
+ */
 async function appendCsv(row) {
-  const line = [
-    1,
+  const csvLine = [
+    1, // version
     row.tsStart,
     row.tsEnd,
     row.status,
@@ -47,109 +64,180 @@ async function appendCsv(row) {
     row.resume || '',
     row.notes || '',
     row.jobId || ''
-  ].map(csvEsc).join(',') + '\n';
-  await fs.appendFile(CSV_PATH, line, 'utf8');
+  ].map(escapeCsvValue).join(',') + '\n';
+
+  await fs.appendFile(CSV_PATH, csvLine, 'utf8');
 }
 
-/* ---------------------------------- config ---------------------------------- */
+// ============================================================================
+// CONFIGURATION
+// ============================================================================
 
+/**
+ * Loads and validates user configuration from config/user.json
+ */
 async function loadUser() {
-  const raw = await fs.readFile(CONFIG_PATH, 'utf8');
-  const u = JSON.parse(raw);
+  const rawConfig = await fs.readFile(CONFIG_PATH, 'utf8');
+  const userConfig = JSON.parse(rawConfig);
 
-  for (const k of ['firstName', 'lastName', 'email', 'resumePath']) {
-    if (!u[k]) throw new Error(`Missing "${k}" in ${CONFIG_PATH}`);
+  // Validate required fields
+  const requiredFields = ['firstName', 'lastName', 'email', 'resumePath'];
+  for (const field of requiredFields) {
+    if (!userConfig[field]) {
+      throw new Error(`Missing required field "${field}" in ${CONFIG_PATH}`);
+    }
   }
-  u.resumePath = resolve(__dirname, '..', u.resumePath);
-  return u;
+
+  // Resolve resume path to absolute path
+  userConfig.resumePath = resolve(__dirname, '..', userConfig.resumePath);
+  return userConfig;
 }
 
-/* ------------------------------- meta extraction ----------------------------- */
+// ============================================================================
+// PAGE METADATA EXTRACTION
+// ============================================================================
 
+/**
+ * Extracts job posting metadata from the current page
+ */
 async function extractMeta(page) {
   try {
-    const data = await page.evaluate(() => {
-      const get = (sel) =>
-        document.querySelector(sel)?.content ||
-        document.querySelector(sel)?.innerText ||
-        null;
+    const pageData = await page.evaluate(() => {
+      // Helper to get content from meta tags or elements
+      const getContent = (selector) => {
+        const element = document.querySelector(selector);
+        return element?.content || element?.innerText || null;
+      };
 
-      const ogTitle = get('meta[property="og:title"]');
-      const twTitle = get('meta[name="twitter:title"]');
-      const h1 = document.querySelector('h1')?.innerText || null;
-      let title = (ogTitle || twTitle || h1 || document.title || '').trim().slice(0, 160);
+      // Extract title from various sources
+      const ogTitle = getContent('meta[property="og:title"]');
+      const twitterTitle = getContent('meta[name="twitter:title"]');
+      const h1Title = document.querySelector('h1')?.innerText || null;
+      const pageTitle = document.title || '';
 
-      const siteName = document.querySelector('meta[property="og:site_name"]')?.content || null;
+      const title = (ogTitle || twitterTitle || h1Title || pageTitle)
+        .trim()
+        .slice(0, 160);
 
-      // JSON-LD JobPosting → company
+      const siteName = getContent('meta[property="og:site_name"]');
+
+      // Extract company from JSON-LD structured data
       let company = null;
-      for (const s of Array.from(document.querySelectorAll('script[type="application/ld+json"]'))) {
+      const jsonLdScripts = document.querySelectorAll('script[type="application/ld+json"]');
+
+      for (const script of jsonLdScripts) {
         try {
-          const j = JSON.parse(s.textContent || '{}');
-          const arr = Array.isArray(j) ? j : [j];
-          for (const obj of arr) {
-            if (obj['@type'] === 'JobPosting' && obj.hiringOrganization?.name) {
-              company = obj.hiringOrganization.name;
+          const data = JSON.parse(script.textContent || '{}');
+          const items = Array.isArray(data) ? data : [data];
+
+          for (const item of items) {
+            if (item['@type'] === 'JobPosting' && item.hiringOrganization?.name) {
+              company = item.hiringOrganization.name;
               break;
             }
           }
           if (company) break;
-        } catch { }
+        } catch {
+          // Ignore invalid JSON
+        }
       }
+
       return { title, siteName, company };
     });
 
-    const host = new URL(page.url()).hostname;
-    let source = 'Other';
-    if (host.includes('greenhouse.io')) source = 'Greenhouse';
-    else if (host.includes('lever.co')) source = 'Lever';
-    else if (host.includes('myworkdayjobs')) source = 'Workday';
-    else if (host.includes('personio') || host.includes('join.com')) source = 'Personio';
-    else if (host.includes('smartrecruiters')) source = 'SmartRecruiters';
-    else if (host.includes('linkedin.com')) source = 'LinkedIn';
+    // Determine job board source from URL
+    const hostname = new URL(page.url()).hostname;
+    const source = getJobBoardSource(hostname);
 
-    const company = data.company || data.siteName || host.replace(/^www\./, '');
-    const title = data.title || '';
+    // Finalize company and title
+    const company = pageData.company || pageData.siteName || hostname.replace(/^www\./, '');
+    const title = pageData.title || '';
+
     return { company, title, source };
   } catch {
     return { company: '', title: '', source: 'Other' };
   }
 }
 
-/* --------------------------------- helpers ---------------------------------- */
-/** Utilities use getByLabel/getByRole first (most stable), then light heuristics **/
+/**
+ * Determines the job board source based on hostname
+ */
+function getJobBoardSource(hostname) {
+  const sourceMap = {
+    'greenhouse.io': 'Greenhouse',
+    'lever.co': 'Lever',
+    'myworkdayjobs': 'Workday',
+    'personio': 'Personio',
+    'join.com': 'Personio',
+    'smartrecruiters': 'SmartRecruiters',
+    'linkedin.com': 'LinkedIn'
+  };
 
+  for (const [domain, source] of Object.entries(sourceMap)) {
+    if (hostname.includes(domain)) {
+      return source;
+    }
+  }
+
+  return 'Other';
+}
+
+// ============================================================================
+// FORM FILLING HELPERS
+// ============================================================================
+// These utilities prioritize accessibility-first approaches (getByLabel/getByRole)
+// then fall back to heuristic-based selectors for maximum compatibility
+
+/**
+ * Fills a text input field by matching against provided labels
+ */
 async function fillTextByLabel(page, labels, value, fieldName) {
-  if (!value) { log(`fill: skip ${fieldName} – empty value`); return false; }
-  for (const name of labels) {
+  if (!value) {
+    log(`fill: skip ${fieldName} – empty value`);
+    return false;
+  }
+
+  // Try label-based approach first (most reliable)
+  for (const label of labels) {
     try {
-      const input = page.getByLabel(name, { exact: false });
+      const input = page.getByLabel(label, { exact: false });
       if (await input.count()) {
         await input.first().fill(value);
-        log(`fill: ok   ${fieldName} via label "${name}"`);
+        log(`fill: ok   ${fieldName} via label "${label}"`);
         return true;
       }
-    } catch { }
+    } catch {
+      // Continue to next label
+    }
   }
-  // fallback: role=textbox with accessible name
-  for (const name of labels) {
+
+  // Fallback: try role-based approach
+  for (const label of labels) {
     try {
-      const tb = page.getByRole('textbox', { name, exact: false });
-      if (await tb.count()) {
-        await tb.first().fill(value);
-        log(`fill: ok   ${fieldName} via role name "${name}"`);
+      const textbox = page.getByRole('textbox', { name: label, exact: false });
+      if (await textbox.count()) {
+        await textbox.first().fill(value);
+        log(`fill: ok   ${fieldName} via role name "${label}"`);
         return true;
       }
-    } catch { }
+    } catch {
+      // Continue to next label
+    }
   }
+
   log(`fill: miss ${fieldName}`);
   return false;
 }
 
+/**
+ * Clicks a radio button by matching against provided labels and option text
+ */
 async function clickRadioByLabel(page, labels, optionText, fieldName) {
-  // Example: Gender → "Female"
-  if (!optionText) return false;
-  // try grouped by field label first
+  if (!optionText) {
+    return false;
+  }
+
+  // Try grouped radio buttons first (e.g., Gender group with Male/Female options)
   for (const groupLabel of labels) {
     try {
       const group = page.getByRole('group', { name: groupLabel, exact: false });
@@ -161,9 +249,12 @@ async function clickRadioByLabel(page, labels, optionText, fieldName) {
           return true;
         }
       }
-    } catch { }
+    } catch {
+      // Continue to next group
+    }
   }
-  // global fallback
+
+  // Global fallback: try to find radio button anywhere on page
   try {
     const radio = page.getByRole('radio', { name: optionText, exact: false }).first();
     if (await radio.count()) {
@@ -171,147 +262,212 @@ async function clickRadioByLabel(page, labels, optionText, fieldName) {
       log(`radio: ok   ${fieldName}="${optionText}" (global)`);
       return true;
     }
-  } catch { }
+  } catch {
+    // No radio button found
+  }
+
   log(`radio: miss ${fieldName}="${optionText}"`);
   return false;
 }
 
+/**
+ * Selects an option in a dropdown/select field by matching against provided labels
+ */
 async function selectByLabel(page, labels, value, fieldName) {
-  if (!value) { log(`select: skip ${fieldName} – empty value`); return false; }
-  for (const name of labels) {
+  if (!value) {
+    log(`select: skip ${fieldName} – empty value`);
+    return false;
+  }
+
+  // Try label-based select elements first
+  for (const label of labels) {
     try {
-      const sel = page.getByLabel(name, { exact: false });
-      if (await sel.count()) {
-        // try select element
-        const el = sel.first();
+      const select = page.getByLabel(label, { exact: false });
+      if (await select.count()) {
+        const element = select.first();
         try {
-          await el.selectOption({ label: value }).catch(async () => {
-            await el.selectOption({ value }).catch(async () => {
-              await el.fill(value);
+          // Try different selection methods
+          await element.selectOption({ label: value }).catch(async () => {
+            await element.selectOption({ value }).catch(async () => {
+              await element.fill(value);
             });
           });
-          log(`select: ok   ${fieldName}="${value}" via label "${name}"`);
+          log(`select: ok   ${fieldName}="${value}" via label "${label}"`);
           return true;
-        } catch { }
+        } catch {
+          // Continue to next label
+        }
       }
-    } catch { }
+    } catch {
+      // Continue to next label
+    }
   }
-  // role=combobox fallback
-  for (const name of labels) {
+
+  // Fallback: try combobox role
+  for (const label of labels) {
     try {
-      const combo = page.getByRole('combobox', { name, exact: false });
-      if (await combo.count()) {
-        const el = combo.first();
-        await el.fill(value).catch(async () => await el.pressSequentially(value));
-        log(`select: ok   ${fieldName} via combobox "${name}" (typed)`);
+      const combobox = page.getByRole('combobox', { name: label, exact: false });
+      if (await combobox.count()) {
+        const element = combobox.first();
+        await element.fill(value).catch(async () => await element.pressSequentially(value));
+        log(`select: ok   ${fieldName} via combobox "${label}" (typed)`);
         return true;
       }
-    } catch { }
+    } catch {
+      // Continue to next label
+    }
   }
+
   log(`select: miss ${fieldName}`);
   return false;
 }
 
+/**
+ * Uploads a file to a file input field by matching against provided labels
+ */
 async function setFileByLabel(page, labels, filePath, fieldName) {
-  if (!filePath) return false;
-  for (const name of labels) {
+  if (!filePath) {
+    return false;
+  }
+
+  // Try label-based file inputs first
+  for (const label of labels) {
     try {
-      const inp = page.getByLabel(name, { exact: false });
-      if (await inp.count()) {
-        const el = inp.first();
-        await el.setInputFiles(filePath);
-        log(`upload: ok   ${fieldName} via label "${name}"`);
+      const fileInput = page.getByLabel(label, { exact: false });
+      if (await fileInput.count()) {
+        const element = fileInput.first();
+        await element.setInputFiles(filePath);
+        log(`upload: ok   ${fieldName} via label "${label}"`);
         return true;
       }
-    } catch { }
+    } catch {
+      // Continue to next label
+    }
   }
-  // fallback plain file input
+
+  // Fallback: try any file input on the page
   try {
-    const files = page.locator('input[type=file]');
-    if (await files.count()) {
-      await files.first().setInputFiles(filePath);
+    const fileInputs = page.locator('input[type=file]');
+    if (await fileInputs.count()) {
+      await fileInputs.first().setInputFiles(filePath);
       log(`upload: ok   ${fieldName} via generic file input`);
       return true;
     }
-  } catch { }
+  } catch {
+    // No file inputs found
+  }
+
   log(`upload: miss ${fieldName}`);
   return false;
 }
 
+/**
+ * Finds the first visible element matching any of the provided selectors
+ */
 async function findFirstVisibleSelector(page, selectors, label) {
-  for (const sel of selectors) {
-    const loc = page.locator(sel).first();
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
     try {
-      if (await loc.count()) {
-        const visible = await loc.isVisible().catch(() => true);
-        if (visible) {
-          log(`detect: found ${label} via ${sel}`);
-          return sel;
+      if (await locator.count()) {
+        const isVisible = await locator.isVisible().catch(() => true);
+        if (isVisible) {
+          log(`detect: found ${label} via ${selector}`);
+          return selector;
         }
       }
-    } catch { }
+    } catch {
+      // Continue to next selector
+    }
   }
+
   log(`detect: no ${label} found`);
   return null;
 }
 
+/**
+ * Fills a field using generic selectors based on field type
+ * Works for any field type (email, phone, linkedin, github, etc.)
+ */
 async function fillGenericField(page, fieldType, value, fieldName) {
-  if (!value) { log(`generic: skip ${fieldName} – empty value`); return false; }
+  if (!value) {
+    log(`generic: skip ${fieldName} – empty value`);
+    return false;
+  }
 
+  // Try predefined selectors for this field type
   const selectors = GENERIC_SELECTORS[fieldType] || [];
-  for (const sel of selectors) {
+  for (const selector of selectors) {
     try {
-      const loc = page.locator(sel).first();
-      if (await loc.count()) {
-        const visible = await loc.isVisible().catch(() => true);
-        if (visible) {
-          await loc.fill(value);
-          log(`generic: ok   ${fieldName} via ${sel}`);
+      const locator = page.locator(selector).first();
+      if (await locator.count()) {
+        const isVisible = await locator.isVisible().catch(() => true);
+        if (isVisible) {
+          await locator.fill(value);
+          log(`generic: ok   ${fieldName} via ${selector}`);
           return true;
         }
       }
-    } catch { }
+    } catch {
+      // Continue to next selector
+    }
   }
 
-  // Try alternative approach: look for fields near text that contains the field name
-  // This now works for any field type, not just linkedin/github
+  // Fallback: look for fields near text that contains the field name
   try {
     const fieldText = fieldType.toLowerCase();
     const nearbyInput = page.locator(`text=${fieldText} >> .. >> input`).first();
     if (await nearbyInput.count()) {
-      const visible = await nearbyInput.isVisible().catch(() => true);
-      if (visible) {
+      const isVisible = await nearbyInput.isVisible().catch(() => true);
+      if (isVisible) {
         await nearbyInput.fill(value);
         log(`generic: ok   ${fieldName} via nearby text "${fieldText}"`);
         return true;
       }
     }
-  } catch { }
+  } catch {
+    // No nearby input found
+  }
 
   log(`generic: miss ${fieldName}`);
   return false;
 }
 
+/**
+ * Displays a banner on the page to guide the user after form filling
+ */
 async function showHoldBanner(page, message = 'Review & finish any missing fields, then submit. When done, CLOSE this tab to continue.') {
   await page.evaluate((msg) => {
-    if (document.getElementById('__ea_hold_banner')) return;
-    const wrap = document.createElement('div');
-    wrap.id = '__ea_hold_banner';
-    wrap.style.position = 'fixed';
-    wrap.style.right = '16px';
-    wrap.style.bottom = '16px';
-    wrap.style.zIndex = '2147483647';
-    wrap.style.background = 'rgba(17,24,39,0.96)';
-    wrap.style.color = '#fff';
-    wrap.style.padding = '10px 12px';
-    wrap.style.borderRadius = '10px';
-    wrap.style.font = '13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
-    wrap.style.boxShadow = '0 6px 24px rgba(0,0,0,0.3)';
-    wrap.textContent = msg;
-    document.body.appendChild(wrap);
+    // Avoid duplicate banners
+    if (document.getElementById('__ea_hold_banner')) {
+      return;
+    }
+
+    const banner = document.createElement('div');
+    banner.id = '__ea_hold_banner';
+    banner.textContent = msg;
+
+    // Style the banner
+    Object.assign(banner.style, {
+      position: 'fixed',
+      right: '16px',
+      bottom: '16px',
+      zIndex: '2147483647',
+      background: 'rgba(17,24,39,0.96)',
+      color: '#fff',
+      padding: '10px 12px',
+      borderRadius: '10px',
+      font: '13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+      boxShadow: '0 6px 24px rgba(0,0,0,0.3)'
+    });
+
+    document.body.appendChild(banner);
   }, message);
 }
 
+/**
+ * Waits for the form to stabilize (no new fields being added)
+ * This helps ensure all dynamic content has loaded before filling
+ */
 async function waitForFormStability(page, maxWaitTime = 5000) {
   let previousFieldCount = 0;
   let stableCount = 0;
@@ -324,8 +480,9 @@ async function waitForFormStability(page, maxWaitTime = 5000) {
 
     if (currentFieldCount === previousFieldCount) {
       stableCount++;
-      if (stableCount >= 3) { // Stable for 3 checks
-        log(`form: stable with ${currentFieldCount} fields after ${Date.now() - startTime}ms`);
+      if (stableCount >= 3) { // Stable for 3 consecutive checks
+        const elapsed = Date.now() - startTime;
+        log(`form: stable with ${currentFieldCount} fields after ${elapsed}ms`);
         return true;
       }
     } else {
@@ -341,6 +498,9 @@ async function waitForFormStability(page, maxWaitTime = 5000) {
   return false;
 }
 
+/**
+ * Analyzes and logs information about form fields for debugging purposes
+ */
 async function debugFormFields(page) {
   try {
     const fields = await page.evaluate(() => {
@@ -365,20 +525,23 @@ async function debugFormFields(page) {
       log(`  ${field.tag}[type="${field.type}"] name="${field.name}" id="${field.id}" placeholder="${field.placeholder}" label="${field.label}" aria-label="${field.ariaLabel}" data-field="${field.dataField}" data-name="${field.dataName}" class="${field.className}"`);
     });
 
-    // Check for any fields that might contain common field type keywords in any attribute
-    const commonFieldTypes = ['linkedin', 'github', 'twitter', 'facebook', 'instagram', 'portfolio', 'website', 'url', 'phone', 'email', 'salary', 'experience', 'education', 'skills'];
-    const detectedFields = {};
+    // Check for fields matching common field type keywords
+    const commonFieldTypes = [
+      'linkedin', 'github', 'twitter', 'facebook', 'instagram',
+      'portfolio', 'website', 'url', 'phone', 'email', 'salary',
+      'experience', 'education', 'skills'
+    ];
 
+    const detectedFields = {};
     commonFieldTypes.forEach(fieldType => {
-      const matchingFields = fields.filter(field =>
-        field.name.toLowerCase().includes(fieldType) ||
-        field.id.toLowerCase().includes(fieldType) ||
-        field.placeholder.toLowerCase().includes(fieldType) ||
-        field.label.toLowerCase().includes(fieldType) ||
-        field.ariaLabel.toLowerCase().includes(fieldType) ||
-        field.dataField.toLowerCase().includes(fieldType) ||
-        field.dataName.toLowerCase().includes(fieldType)
-      );
+      const matchingFields = fields.filter(field => {
+        const searchText = [
+          field.name, field.id, field.placeholder, field.label,
+          field.ariaLabel, field.dataField, field.dataName
+        ].join(' ').toLowerCase();
+
+        return searchText.includes(fieldType);
+      });
 
       if (matchingFields.length > 0) {
         detectedFields[fieldType] = matchingFields;
@@ -396,14 +559,17 @@ async function debugFormFields(page) {
     } else {
       log(`debug: no fields found matching common field type keywords`);
     }
-  } catch (e) {
-    log(`debug: error analyzing form fields: ${e.message}`);
+  } catch (error) {
+    log(`debug: error analyzing form fields: ${error.message}`);
   }
 }
 
-/* --------------------------- field label registry --------------------------- */
+// ============================================================================
+// FIELD LABEL REGISTRY
+// ============================================================================
+// Common label variations for form fields across different job boards
 
-const L = {
+const FIELD_LABELS = {
   firstName: ['First name', 'Given name', 'Vorname', 'Prénom', 'First Name', 'Firstname'],
   lastName: ['Last name', 'Family name', 'Surname', 'Nachname', 'Nom', 'Last Name', 'Lastname'],
   fullName: ['Full name', 'Your full name', 'Name (full)', 'Full Name', 'Name'],
@@ -421,18 +587,24 @@ const L = {
   github: ['GitHub', 'GitHub profile', 'GitHub URL', 'GitHub Profile', 'Github', 'Github profile']
 };
 
-// strict selectors for name split / fullname
-const FIRST_SELECTORS = [
+// ============================================================================
+// FIELD SELECTORS
+// ============================================================================
+// Specific selectors for name fields (first, last, full name)
+
+const FIRST_NAME_SELECTORS = [
   'input[name*=first i]', 'input[id*=first i]', 'input[placeholder*=first i]',
   'input[name*="firstName"]', 'input[id*="firstName"]',
   'input[name*="first_name"]', 'input[id*="first_name"]'
 ];
-const LAST_SELECTORS = [
+
+const LAST_NAME_SELECTORS = [
   'input[name*=last i]', 'input[id*=last i]', 'input[placeholder*=last i]',
   'input[name*="lastName"]', 'input[id*="lastName"]',
   'input[name*="last_name"]', 'input[id*="last_name"]'
 ];
-const FULLNAME_STRICT = [
+
+const FULL_NAME_SELECTORS = [
   'input[autocomplete="name"]',
   'input[name="fullName"]', 'input[id="fullName"]',
   'input[name="fullname"]', 'input[id="fullname"]',
@@ -441,7 +613,10 @@ const FULLNAME_STRICT = [
   'input[name*="full_name"]', 'input[id*="full_name"]'
 ];
 
-// Helper function to generate selectors for any field type
+/**
+ * Generates CSS selectors for a given field type with optional variations
+ * This creates consistent selector patterns for any field type
+ */
 function generateFieldSelectors(fieldType, variations = []) {
   const baseSelectors = [
     `input[name*="${fieldType}" i]`,
@@ -465,7 +640,10 @@ function generateFieldSelectors(fieldType, variations = []) {
   return baseSelectors;
 }
 
-// Generic form field selectors - now using the helper function for consistency
+/**
+ * Generic form field selectors for various field types
+ * Uses the helper function for consistent selector generation
+ */
 const GENERIC_SELECTORS = {
   email: [
     'input[type="email"]',
@@ -491,10 +669,14 @@ const GENERIC_SELECTORS = {
   skills: generateFieldSelectors('skills', ['technical_skills', 'professional_skills', 'competencies'])
 };
 
-/* ---------------------------------- runner ---------------------------------- */
+// ============================================================================
+// MAIN RUNNER
+// ============================================================================
 
+/**
+ * Main function to process a batch of job application URLs
+ */
 export async function runBatch(urls) {
-
   await ensureOutFiles();
   const user = await loadUser();
 
@@ -505,13 +687,14 @@ export async function runBatch(urls) {
   log(`batch: starting ${urls.length} URL(s)`);
 
   try {
-    let i = 0;
-    for (const url of urls) {
-      i += 1;
+    for (let i = 0; i < urls.length; i++) {
+      const url = urls[i];
+      const jobNumber = i + 1;
       const tsStart = new Date().toISOString();
       const jobId = crypto.createHash('sha1').update(url + tsStart).digest('hex').slice(0, 12);
-      const t0 = Date.now();
-      log(`\n--- job ${i}/${urls.length} ---`);
+      const startTime = Date.now();
+
+      log(`\n--- job ${jobNumber}/${urls.length} ---`);
       log(`nav: ${url}`);
 
       let status = 'error';
@@ -520,12 +703,13 @@ export async function runBatch(urls) {
 
       try {
         await page.goto(url, { waitUntil: 'domcontentloaded' });
-        // Give late-loaded frameworks a moment
+        // Give late-loaded frameworks a moment to initialize
         await page.waitForTimeout(1200);
+
         meta = await extractMeta(page);
         log(`meta: company="${meta.company}" title="${meta.title}" source=${meta.source}`);
 
-        // Wait for form stability - this works for any platform
+        // Wait for form stability - ensures all dynamic content has loaded
         const isStable = await waitForFormStability(page);
         if (!isStable) {
           log('form: form may still be loading, proceeding with current state');
@@ -534,42 +718,45 @@ export async function runBatch(urls) {
         // Debug form fields to understand structure
         await debugFormFields(page);
 
-        /* -------- Names: prefer First+Last; only use Full name if both absent and full present -------- */
-        const firstSel = await findFirstVisibleSelector(page, FIRST_SELECTORS, 'firstName');
-        const lastSel = await findFirstVisibleSelector(page, LAST_SELECTORS, 'lastName');
-        const fullSel = await findFirstVisibleSelector(page, FULLNAME_STRICT, 'fullName (strict)');
+        // ========================================================================
+        // NAME FIELDS: Prefer First+Last; use Full name only if both absent
+        // ========================================================================
+        const firstSelector = await findFirstVisibleSelector(page, FIRST_NAME_SELECTORS, 'firstName');
+        const lastSelector = await findFirstVisibleSelector(page, LAST_NAME_SELECTORS, 'lastName');
+        const fullSelector = await findFirstVisibleSelector(page, FULL_NAME_SELECTORS, 'fullName (strict)');
 
-        if (firstSel && lastSel) {
-          await page.fill(firstSel, user.firstName).catch(() => { });
-          log(`fill: ok   firstName→${firstSel}`);
-          await page.fill(lastSel, user.lastName).catch(() => { });
-          log(`fill: ok   lastName →${lastSel}`);
-        } else if (!firstSel && !lastSel && fullSel) {
+        if (firstSelector && lastSelector) {
+          await page.fill(firstSelector, user.firstName).catch(() => { });
+          log(`fill: ok   firstName→${firstSelector}`);
+          await page.fill(lastSelector, user.lastName).catch(() => { });
+          log(`fill: ok   lastName →${lastSelector}`);
+        } else if (!firstSelector && !lastSelector && fullSelector) {
           const fullName = `${user.firstName} ${user.lastName}`;
-          await page.fill(fullSel, fullName).catch(() => { });
-          log(`fill: ok   fullName→${fullSel}`);
+          await page.fill(fullSelector, fullName).catch(() => { });
+          log(`fill: ok   fullName→${fullSelector}`);
         } else {
           // Try label-driven first/last as fallback
-          await fillTextByLabel(page, L.firstName, user.firstName, 'firstName');
-          await fillTextByLabel(page, L.lastName, user.lastName, 'lastName');
+          await fillTextByLabel(page, FIELD_LABELS.firstName, user.firstName, 'firstName');
+          await fillTextByLabel(page, FIELD_LABELS.lastName, user.lastName, 'lastName');
         }
 
-        /* ------------------------------ Contact / Links ------------------------------ */
-        // Try generic selectors first for all forms
-        let emailFilled = await fillGenericField(page, 'email', user.email, 'email');
-        let phoneFilled = await fillGenericField(page, 'phone', user.phone, 'phone');
-        let salaryFilled = await fillGenericField(page, 'salary', user.salary, 'salary');
-        let linkedinFilled = await fillGenericField(page, 'linkedin', user.linkedin || '', 'linkedin');
-        let githubFilled = await fillGenericField(page, 'github', user.github || '', 'github');
-        let websiteFilled = await fillGenericField(page, 'website', user.website || '', 'website');
+        // ========================================================================
+        // CONTACT & SOCIAL LINKS: Try generic selectors first, then label-based
+        // ========================================================================
+        const emailFilled = await fillGenericField(page, 'email', user.email, 'email');
+        const phoneFilled = await fillGenericField(page, 'phone', user.phone, 'phone');
+        const salaryFilled = await fillGenericField(page, 'salary', user.salary, 'salary');
+        const linkedinFilled = await fillGenericField(page, 'linkedin', user.linkedin || '', 'linkedin');
+        const githubFilled = await fillGenericField(page, 'github', user.github || '', 'github');
+        const websiteFilled = await fillGenericField(page, 'website', user.website || '', 'website');
 
         // Fallback to label-based filling if generic selectors didn't work
-        if (!emailFilled) await fillTextByLabel(page, L.email, user.email, 'email');
-        if (!phoneFilled) await fillTextByLabel(page, L.phone, user.phone, 'phone');
-        if (!salaryFilled) await fillTextByLabel(page, L.salary, user.salary, 'salary');
-        if (!linkedinFilled) await fillTextByLabel(page, L.linkedin, user.linkedin || '', 'linkedin');
-        if (!githubFilled) await fillTextByLabel(page, L.github, user.github || '', 'github');
-        if (!websiteFilled) await fillTextByLabel(page, L.personalUrl, user.website || user.linkedin || '', 'personalUrl');
+        if (!emailFilled) await fillTextByLabel(page, FIELD_LABELS.email, user.email, 'email');
+        if (!phoneFilled) await fillTextByLabel(page, FIELD_LABELS.phone, user.phone, 'phone');
+        if (!salaryFilled) await fillTextByLabel(page, FIELD_LABELS.salary, user.salary, 'salary');
+        if (!linkedinFilled) await fillTextByLabel(page, FIELD_LABELS.linkedin, user.linkedin || '', 'linkedin');
+        if (!githubFilled) await fillTextByLabel(page, FIELD_LABELS.github, user.github || '', 'github');
+        if (!websiteFilled) await fillTextByLabel(page, FIELD_LABELS.personalUrl, user.website || user.linkedin || '', 'personalUrl');
 
         // Last resort: try to find any URL fields that might be for social media
         if (!linkedinFilled && user.linkedin) {
@@ -580,35 +767,43 @@ export async function runBatch(urls) {
               // Try the first URL field as a fallback for LinkedIn
               await urlFields.first().fill(user.linkedin);
               log(`fallback: filled LinkedIn URL in first URL field`);
-              linkedinFilled = true;
             }
-          } catch { }
+          } catch {
+            // No URL fields found
+          }
         }
 
-        /* ----------------------------------- Upload ---------------------------------- */
-        await setFileByLabel(page, L.cv, user.resumePath, 'cv');
+        // ========================================================================
+        // FILE UPLOAD
+        // ========================================================================
+        await setFileByLabel(page, FIELD_LABELS.cv, user.resumePath, 'cv');
 
-        /* ----------------------------- Questions / selects ---------------------------- */
-        // Gender (example choose Female if preferred)
+        // ========================================================================
+        // ADDITIONAL QUESTIONS & SELECTS
+        // ========================================================================
+        // Gender selection
         if (user.gender) {
-          await clickRadioByLabel(page, L.gender, user.gender, 'gender');
+          await clickRadioByLabel(page, FIELD_LABELS.gender, user.gender, 'gender');
         }
-        // Country & Tax residence
-        await selectByLabel(page, L.country, user.location || 'Germany', 'country');
-        await selectByLabel(page, L.tax, user.taxResidence || 'Germany', 'tax');
+
+        // Location and tax residence
+        await selectByLabel(page, FIELD_LABELS.country, user.location || 'Germany', 'country');
+        await selectByLabel(page, FIELD_LABELS.tax, user.taxResidence || 'Germany', 'tax');
 
         // Notice period
-        const noticeVal = user.noticePeriod || 'Immediate';
-        await fillTextByLabel(page, L.notice, noticeVal, 'notice');
+        const noticeValue = user.noticePeriod || 'Immediate';
+        await fillTextByLabel(page, FIELD_LABELS.notice, noticeValue, 'notice');
 
-        // Salary expectations (EUR)
-        const salaryVal = user.salary || 'Flexible';
-        await fillTextByLabel(page, L.salary, salaryVal, 'salary');
+        // Salary expectations
+        const salaryValue = user.salary || 'Flexible';
+        await fillTextByLabel(page, FIELD_LABELS.salary, salaryValue, 'salary');
 
-        // Referral
-        await fillTextByLabel(page, L.referred, user.referredBy || '', 'referred');
+        // Referral information
+        await fillTextByLabel(page, FIELD_LABELS.referred, user.referredBy || '', 'referred');
 
-        /* --------------------------------- Submit step -------------------------------- */
+        // ========================================================================
+        // SUBMISSION & COMPLETION
+        // ========================================================================
         status = 'filled';
         notes = 'form filled, waiting for manual submission and tab close';
         log('submit: form filled, user must manually submit and close tab');
@@ -625,26 +820,27 @@ export async function runBatch(urls) {
           status = 'submitted';
           notes = 'form submitted and tab closed by user';
           log('submit: tab closed by user, marking as submitted');
-        } catch (e) {
+        } catch (error) {
           // If there's an error waiting for close (shouldn't happen with timeout: 0)
           status = 'error';
           notes = 'error waiting for tab close';
           log('submit: error waiting for tab close');
         }
-      } catch (e) {
+      } catch (error) {
         status = 'error';
-        notes = e?.message || 'unknown error';
-        console.error('[easyapply] ERROR:', e?.stack || e);
+        notes = error?.message || 'unknown error';
+        console.error('[easyapply] ERROR:', error?.stack || error);
       }
 
+      // Record the job application result
       const tsEnd = new Date().toISOString();
-      const dur = ((Date.now() - t0) / 1000).toFixed(1);
+      const duration = ((Date.now() - startTime) / 1000).toFixed(1);
       await appendCsv({
         tsStart, tsEnd, status,
         company: meta.company, title: meta.title, source: meta.source,
         url, resume: user.resumePath, notes, jobId
       });
-      log(`done: status=${status} duration=${dur}s`);
+      log(`done: status=${status} duration=${duration}s`);
     }
   } finally {
     await context.close();
@@ -652,3 +848,4 @@ export async function runBatch(urls) {
     log('batch: finished');
   }
 }
+
