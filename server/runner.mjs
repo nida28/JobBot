@@ -408,7 +408,7 @@ export async function runBatch(urls, options = {}) {
       await appendCsv({
         tsStart, tsEnd, status,
         company: meta.company, title: meta.title, source: meta.source,
-        url, resume: 'config/resume.pdf', notes, jobId
+        url, resume: user.resumePath, notes, jobId
       });
       log(`done: status=${status} duration=${dur}s`);
     }

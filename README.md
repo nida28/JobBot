@@ -32,14 +32,18 @@ JobBot is an automated job application tool that helps you apply to multiple job
 
 ## Configuration
 
-1. Place your resume/CV file in the `config/` directory
-2. Create a `config/user.json` file with your personal information:
+1. **Place your resume/CV file in the `config/` directory**
+   - Copy your resume file (PDF format recommended) to the `config/` folder
+   - Note the exact filename for the next step
+
+2. **Create a `config/user.json` file with your personal information:**
    ```json
    {
      "firstName": "Your First Name",
      "lastName": "Your Last Name",
      "email": "your.email@example.com",
      "phone": "+1234567890",
+     "resumePath": "./config/your-resume.pdf",
      "personalUrl": "https://your-website.com",
      "linkedin": "https://linkedin.com/in/yourprofile",
      "country": "Your Country",
@@ -48,6 +52,8 @@ JobBot is an automated job application tool that helps you apply to multiple job
      "salary": "Your Salary Expectation"
    }
    ```
+
+   **Important**: Make sure the `resumePath` in your `user.json` matches the exact filename of your resume file in the `config/` directory.
 
 ## Usage
 
@@ -78,7 +84,7 @@ JobBot/
 │   └── runner.mjs       # Job application automation logic
 ├── config/              # Configuration files
 │   ├── user.json        # Your personal information
-│   └── NidaaMunglooResume.pdf  # Your resume
+│   └── your-resume.pdf  # Your resume (configure path in user.json)
 ├── logs/                # Application logs
 ├── output/              # Generated files (CSV exports)
 └── package.json         # Project dependencies
