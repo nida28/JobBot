@@ -1,12 +1,10 @@
 const urlsEl = document.getElementById('urls');
 const startBtn = document.getElementById('start');
 const statusEl = document.getElementById('status');
-const autoSubmitEl = document.getElementById('autoSubmit');
 
 startBtn.addEventListener('click', async () => {
     const raw = urlsEl.value || '';
     const urls = raw.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-    const autoSubmit = !!autoSubmitEl.checked;
 
     if (!urls.length) {
         statusEl.textContent = 'No URLs found.';
@@ -14,12 +12,12 @@ startBtn.addEventListener('click', async () => {
     }
 
     startBtn.disabled = true;
-    statusEl.textContent = `Sending ${urls.length} URL(s)… (autoSubmit=${autoSubmit})`;
+    statusEl.textContent = `Sending ${urls.length} URL(s)…`;
     try {
         const res = await fetch('/jobs', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ urls, autoSubmit })
+            body: JSON.stringify({ urls })
         });
         const data = await res.json();
         if (!res.ok || !data.ok) {

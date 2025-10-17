@@ -255,42 +255,206 @@ async function findFirstVisibleSelector(page, selectors, label) {
   return null;
 }
 
+async function fillGenericField(page, fieldType, value, fieldName) {
+  if (!value) { log(`generic: skip ${fieldName} – empty value`); return false; }
+
+  const selectors = GENERIC_SELECTORS[fieldType] || [];
+  for (const sel of selectors) {
+    try {
+      const loc = page.locator(sel).first();
+      if (await loc.count()) {
+        const visible = await loc.isVisible().catch(() => true);
+        if (visible) {
+          await loc.fill(value);
+          log(`generic: ok   ${fieldName} via ${sel}`);
+          return true;
+        }
+      }
+    } catch { }
+  }
+
+  // Try alternative approach: look for fields near text that contains the field name
+  if (fieldType === 'linkedin' || fieldType === 'github') {
+    try {
+      const fieldText = fieldType === 'linkedin' ? 'linkedin' : 'github';
+      const nearbyInput = page.locator(`text=${fieldText} >> .. >> input`).first();
+      if (await nearbyInput.count()) {
+        const visible = await nearbyInput.isVisible().catch(() => true);
+        if (visible) {
+          await nearbyInput.fill(value);
+          log(`generic: ok   ${fieldName} via nearby text "${fieldText}"`);
+          return true;
+        }
+      }
+    } catch { }
+  }
+
+  log(`generic: miss ${fieldName}`);
+  return false;
+}
+
+async function debugFormFields(page) {
+  try {
+    const fields = await page.evaluate(() => {
+      const inputs = Array.from(document.querySelectorAll('input, select, textarea'));
+      return inputs.map(input => ({
+        tag: input.tagName.toLowerCase(),
+        type: input.type || 'text',
+        name: input.name || '',
+        id: input.id || '',
+        placeholder: input.placeholder || '',
+        label: input.labels?.[0]?.textContent?.trim() || '',
+        ariaLabel: input.getAttribute('aria-label') || '',
+        dataField: input.getAttribute('data-field') || '',
+        dataName: input.getAttribute('data-name') || '',
+        className: input.className || '',
+        visible: input.offsetParent !== null
+      })).filter(field => field.visible);
+    });
+
+    log(`debug: found ${fields.length} visible form fields:`);
+    fields.forEach(field => {
+      log(`  ${field.tag}[type="${field.type}"] name="${field.name}" id="${field.id}" placeholder="${field.placeholder}" label="${field.label}" aria-label="${field.ariaLabel}" data-field="${field.dataField}" data-name="${field.dataName}" class="${field.className}"`);
+    });
+
+    // Also check for any fields that might contain "linkedin" or "github" in any attribute
+    const socialFields = fields.filter(field =>
+      field.name.toLowerCase().includes('linkedin') ||
+      field.name.toLowerCase().includes('github') ||
+      field.id.toLowerCase().includes('linkedin') ||
+      field.id.toLowerCase().includes('github') ||
+      field.placeholder.toLowerCase().includes('linkedin') ||
+      field.placeholder.toLowerCase().includes('github') ||
+      field.label.toLowerCase().includes('linkedin') ||
+      field.label.toLowerCase().includes('github') ||
+      field.ariaLabel.toLowerCase().includes('linkedin') ||
+      field.ariaLabel.toLowerCase().includes('github') ||
+      field.dataField.toLowerCase().includes('linkedin') ||
+      field.dataField.toLowerCase().includes('github') ||
+      field.dataName.toLowerCase().includes('linkedin') ||
+      field.dataName.toLowerCase().includes('github')
+    );
+
+    if (socialFields.length > 0) {
+      log(`debug: found ${socialFields.length} potential social media fields:`);
+      socialFields.forEach(field => {
+        log(`  SOCIAL: ${field.tag}[type="${field.type}"] name="${field.name}" id="${field.id}" placeholder="${field.placeholder}" label="${field.label}"`);
+      });
+    } else {
+      log(`debug: no social media fields found with linkedin/github keywords`);
+    }
+  } catch (e) {
+    log(`debug: error analyzing form fields: ${e.message}`);
+  }
+}
+
 /* --------------------------- field label registry --------------------------- */
 
 const L = {
-  firstName: ['First name', 'Given name', 'Vorname', 'Prénom'],
-  lastName: ['Last name', 'Family name', 'Surname', 'Nachname', 'Nom'],
-  fullName: ['Full name', 'Your full name', 'Name (full)'],
-  phone: ['Phone', 'Phone number', 'Telefon', 'Téléphone'],
-  email: ['Email', 'E-mail', 'Email address', 'E-Mail'],
+  firstName: ['First name', 'Given name', 'Vorname', 'Prénom', 'First Name', 'Firstname'],
+  lastName: ['Last name', 'Family name', 'Surname', 'Nachname', 'Nom', 'Last Name', 'Lastname'],
+  fullName: ['Full name', 'Your full name', 'Name (full)', 'Full Name', 'Name'],
+  phone: ['Phone', 'Phone number', 'Telefon', 'Téléphone', 'Phone Number', 'Mobile', 'Telephone'],
+  email: ['Email', 'E-mail', 'Email address', 'E-Mail', 'E-mail address', 'Email Address'],
   gender: ['Gender', 'Gender to which you identify as', 'Geschlecht'],
-  personalUrl: ['Personal URL', 'Website', 'Portfolio', 'Personal site', 'Homepage'],
-  cv: ['Curriculum vitae', 'CV', 'Resume', 'Lebenslauf'],
-  country: ['What country do you currently live in', 'Country', 'Current country'],
+  personalUrl: ['Personal URL', 'Website', 'Portfolio', 'Personal site', 'Homepage', 'Website URL'],
+  cv: ['Curriculum vitae', 'CV', 'Resume', 'Lebenslauf', 'Resume/CV', 'Cover Letter'],
+  country: ['What country do you currently live in', 'Country', 'Current country', 'Location'],
   tax: ['Tax residence', 'Where is your tax residence'],
   notice: ['Notice period', 'What is your notice period'],
-  salary: ['Salary expectations', 'What are your salary expectations', 'Salary (EUR)'],
+  salary: ['Salary expectations', 'What are your salary expectations', 'Salary (EUR)', 'Expected salary', 'Salary'],
   referred: ['Were you referred', 'Referral', 'Referred by'],
-  linkedin: ['LinkedIn', 'LinkedIn profile', 'LinkedIn URL']
+  linkedin: ['LinkedIn', 'LinkedIn profile', 'LinkedIn URL', 'LinkedIn Profile'],
+  github: ['GitHub', 'GitHub profile', 'GitHub URL', 'GitHub Profile', 'Github', 'Github profile']
 };
 
 // strict selectors for name split / fullname
-const FIRST_SELECTORS = ['input[name*=first i]', 'input[id*=first i]', 'input[placeholder*=first i]'];
-const LAST_SELECTORS = ['input[name*=last i]', 'input[id*=last i]', 'input[placeholder*=last i]'];
+const FIRST_SELECTORS = [
+  'input[name*=first i]', 'input[id*=first i]', 'input[placeholder*=first i]',
+  'input[name*="firstName"]', 'input[id*="firstName"]',
+  'input[name*="first_name"]', 'input[id*="first_name"]'
+];
+const LAST_SELECTORS = [
+  'input[name*=last i]', 'input[id*=last i]', 'input[placeholder*=last i]',
+  'input[name*="lastName"]', 'input[id*="lastName"]',
+  'input[name*="last_name"]', 'input[id*="last_name"]'
+];
 const FULLNAME_STRICT = [
   'input[autocomplete="name"]',
-  'input[name="fullName"]',
-  'input[id="fullName"]',
-  'input[name="fullname"]',
-  'input[id="fullname"]',
+  'input[name="fullName"]', 'input[id="fullName"]',
+  'input[name="fullname"]', 'input[id="fullname"]',
   'input[placeholder*="full name" i]',
-  'input[aria-label*="full name" i]'
+  'input[aria-label*="full name" i]',
+  'input[name*="full_name"]', 'input[id*="full_name"]'
 ];
+
+// Generic form field selectors
+const GENERIC_SELECTORS = {
+  email: [
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[id*="email" i]',
+    'input[placeholder*="email" i]'
+  ],
+  phone: [
+    'input[type="tel"]',
+    'input[name*="phone" i]',
+    'input[id*="phone" i]',
+    'input[placeholder*="phone" i]',
+    'input[name*="mobile" i]',
+    'input[id*="mobile" i]'
+  ],
+  salary: [
+    'input[name*="salary" i]',
+    'input[id*="salary" i]',
+    'input[placeholder*="salary" i]',
+    'select[name*="salary" i]',
+    'select[id*="salary" i]'
+  ],
+  linkedin: [
+    'input[name*="linkedin" i]',
+    'input[id*="linkedin" i]',
+    'input[placeholder*="linkedin" i]',
+    'input[name*="linked_in" i]',
+    'input[id*="linked_in" i]',
+    'input[name*="social_linkedin" i]',
+    'input[id*="social_linkedin" i]',
+    'input[name*="profile_linkedin" i]',
+    'input[id*="profile_linkedin" i]',
+    'input[name*="url_linkedin" i]',
+    'input[id*="url_linkedin" i]',
+    'input[data-field*="linkedin" i]',
+    'input[data-name*="linkedin" i]'
+  ],
+  github: [
+    'input[name*="github" i]',
+    'input[id*="github" i]',
+    'input[placeholder*="github" i]',
+    'input[name*="git_hub" i]',
+    'input[id*="git_hub" i]',
+    'input[name*="social_github" i]',
+    'input[id*="social_github" i]',
+    'input[name*="profile_github" i]',
+    'input[id*="profile_github" i]',
+    'input[name*="url_github" i]',
+    'input[id*="url_github" i]',
+    'input[data-field*="github" i]',
+    'input[data-name*="github" i]'
+  ],
+  website: [
+    'input[name*="website" i]',
+    'input[id*="website" i]',
+    'input[placeholder*="website" i]',
+    'input[name*="portfolio" i]',
+    'input[id*="portfolio" i]',
+    'input[name*="url" i]',
+    'input[id*="url" i]'
+  ]
+};
 
 /* ---------------------------------- runner ---------------------------------- */
 
-export async function runBatch(urls, options = {}) {
-  const autoSubmit = !!options.autoSubmit;
+export async function runBatch(urls) {
 
   await ensureOutFiles();
   const user = await loadUser();
@@ -299,7 +463,7 @@ export async function runBatch(urls, options = {}) {
   const context = await browser.newContext();
   const page = await context.newPage();
 
-  log(`batch: starting ${urls.length} URL(s), autoSubmit=${autoSubmit}`);
+  log(`batch: starting ${urls.length} URL(s)`);
 
   try {
     let i = 0;
@@ -322,6 +486,13 @@ export async function runBatch(urls, options = {}) {
         meta = await extractMeta(page);
         log(`meta: company="${meta.company}" title="${meta.title}" source=${meta.source}`);
 
+        // For dynamic forms, wait a bit longer for content loading
+        if (meta.source === 'Personio' || meta.source === 'Workday' || meta.source === 'Greenhouse') {
+          await page.waitForTimeout(2000);
+          log('dynamic: additional wait for form loading');
+          await debugFormFields(page);
+        }
+
         /* -------- Names: prefer First+Last; only use Full name if both absent and full present -------- */
         const firstSel = await findFirstVisibleSelector(page, FIRST_SELECTORS, 'firstName');
         const lastSel = await findFirstVisibleSelector(page, LAST_SELECTORS, 'lastName');
@@ -343,10 +514,35 @@ export async function runBatch(urls, options = {}) {
         }
 
         /* ------------------------------ Contact / Links ------------------------------ */
-        await fillTextByLabel(page, L.email, user.email, 'email');
-        await fillTextByLabel(page, L.phone, user.phone, 'phone');
-        await fillTextByLabel(page, L.personalUrl, user.website || user.linkedin || '', 'personalUrl');
-        await fillTextByLabel(page, L.linkedin, user.linkedin || '', 'linkedin');
+        // Try generic selectors first for all forms
+        let emailFilled = await fillGenericField(page, 'email', user.email, 'email');
+        let phoneFilled = await fillGenericField(page, 'phone', user.phone, 'phone');
+        let salaryFilled = await fillGenericField(page, 'salary', user.salary, 'salary');
+        let linkedinFilled = await fillGenericField(page, 'linkedin', user.linkedin || '', 'linkedin');
+        let githubFilled = await fillGenericField(page, 'github', user.github || '', 'github');
+        let websiteFilled = await fillGenericField(page, 'website', user.website || '', 'website');
+
+        // Fallback to label-based filling if generic selectors didn't work
+        if (!emailFilled) await fillTextByLabel(page, L.email, user.email, 'email');
+        if (!phoneFilled) await fillTextByLabel(page, L.phone, user.phone, 'phone');
+        if (!salaryFilled) await fillTextByLabel(page, L.salary, user.salary, 'salary');
+        if (!linkedinFilled) await fillTextByLabel(page, L.linkedin, user.linkedin || '', 'linkedin');
+        if (!githubFilled) await fillTextByLabel(page, L.github, user.github || '', 'github');
+        if (!websiteFilled) await fillTextByLabel(page, L.personalUrl, user.website || user.linkedin || '', 'personalUrl');
+
+        // Last resort: try to find any URL fields that might be for social media
+        if (!linkedinFilled && user.linkedin) {
+          try {
+            const urlFields = page.locator('input[type="url"], input[placeholder*="url" i], input[name*="url" i]');
+            const count = await urlFields.count();
+            if (count > 0) {
+              // Try the first URL field as a fallback for LinkedIn
+              await urlFields.first().fill(user.linkedin);
+              log(`fallback: filled LinkedIn URL in first URL field`);
+              linkedinFilled = true;
+            }
+          } catch { }
+        }
 
         /* ----------------------------------- Upload ---------------------------------- */
         await setFileByLabel(page, L.cv, user.resumePath, 'cv');
@@ -372,30 +568,21 @@ export async function runBatch(urls, options = {}) {
         await fillTextByLabel(page, L.referred, user.referredBy || '', 'referred');
 
         /* --------------------------------- Submit step -------------------------------- */
-        const submit = page.locator([
-          'button:has-text("Apply")',
-          'button:has-text("Submit")',
-          'button:has-text("Bewerben")',
-          'button:has-text("Absenden")',
-          '[role=button]:has-text("Apply")',
-          'input[type=submit]'
-        ].join(', ')).first();
+        status = 'filled';
+        notes = 'form filled, waiting for manual submission and tab close';
+        log('submit: form filled, user must manually submit and close tab');
 
-        const hasSubmit = await submit.count();
-        log(`submit: candidate present=${!!hasSubmit} autoSubmit=${autoSubmit}`);
-
-        if (hasSubmit && autoSubmit) {
-          await submit.click().catch(() => { });
-          log('submit: clicked');
-          status = 'clicked';
-        } else if (hasSubmit && !autoSubmit) {
-          status = 'skipped';
-          notes = 'autoSubmit=false';
-          log('submit: skipped (autoSubmit disabled)');
-        } else {
-          status = 'skipped';
-          notes = 'no submit button';
-          log('submit: no obvious button found');
+        // Wait for the page to be closed (user closes tab after submitting)
+        try {
+          await page.waitForEvent('close', { timeout: 0 }); // Wait indefinitely until tab is closed
+          status = 'submitted';
+          notes = 'form submitted and tab closed by user';
+          log('submit: tab closed by user, marking as submitted');
+        } catch (e) {
+          // If there's an error waiting for close (shouldn't happen with timeout: 0)
+          status = 'error';
+          notes = 'error waiting for tab close';
+          log('submit: error waiting for tab close');
         }
       } catch (e) {
         status = 'error';
