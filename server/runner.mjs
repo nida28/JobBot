@@ -274,22 +274,70 @@ async function fillGenericField(page, fieldType, value, fieldName) {
   }
 
   // Try alternative approach: look for fields near text that contains the field name
-  if (fieldType === 'linkedin' || fieldType === 'github') {
-    try {
-      const fieldText = fieldType === 'linkedin' ? 'linkedin' : 'github';
-      const nearbyInput = page.locator(`text=${fieldText} >> .. >> input`).first();
-      if (await nearbyInput.count()) {
-        const visible = await nearbyInput.isVisible().catch(() => true);
-        if (visible) {
-          await nearbyInput.fill(value);
-          log(`generic: ok   ${fieldName} via nearby text "${fieldText}"`);
-          return true;
-        }
+  // This now works for any field type, not just linkedin/github
+  try {
+    const fieldText = fieldType.toLowerCase();
+    const nearbyInput = page.locator(`text=${fieldText} >> .. >> input`).first();
+    if (await nearbyInput.count()) {
+      const visible = await nearbyInput.isVisible().catch(() => true);
+      if (visible) {
+        await nearbyInput.fill(value);
+        log(`generic: ok   ${fieldName} via nearby text "${fieldText}"`);
+        return true;
       }
-    } catch { }
-  }
+    }
+  } catch { }
 
   log(`generic: miss ${fieldName}`);
+  return false;
+}
+
+async function showHoldBanner(page, message = 'Review & finish any missing fields, then submit. When done, CLOSE this tab to continue.') {
+  await page.evaluate((msg) => {
+    if (document.getElementById('__ea_hold_banner')) return;
+    const wrap = document.createElement('div');
+    wrap.id = '__ea_hold_banner';
+    wrap.style.position = 'fixed';
+    wrap.style.right = '16px';
+    wrap.style.bottom = '16px';
+    wrap.style.zIndex = '2147483647';
+    wrap.style.background = 'rgba(17,24,39,0.96)';
+    wrap.style.color = '#fff';
+    wrap.style.padding = '10px 12px';
+    wrap.style.borderRadius = '10px';
+    wrap.style.font = '13px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+    wrap.style.boxShadow = '0 6px 24px rgba(0,0,0,0.3)';
+    wrap.textContent = msg;
+    document.body.appendChild(wrap);
+  }, message);
+}
+
+async function waitForFormStability(page, maxWaitTime = 5000) {
+  let previousFieldCount = 0;
+  let stableCount = 0;
+  const startTime = Date.now();
+
+  while (Date.now() - startTime < maxWaitTime) {
+    const currentFieldCount = await page.evaluate(() => {
+      return document.querySelectorAll('input, select, textarea').length;
+    });
+
+    if (currentFieldCount === previousFieldCount) {
+      stableCount++;
+      if (stableCount >= 3) { // Stable for 3 checks
+        log(`form: stable with ${currentFieldCount} fields after ${Date.now() - startTime}ms`);
+        return true;
+      }
+    } else {
+      stableCount = 0;
+      log(`form: field count changed from ${previousFieldCount} to ${currentFieldCount}`);
+    }
+
+    previousFieldCount = currentFieldCount;
+    await page.waitForTimeout(500);
+  }
+
+  log(`form: timeout waiting for stability, final count: ${previousFieldCount}`);
   return false;
 }
 
@@ -317,31 +365,36 @@ async function debugFormFields(page) {
       log(`  ${field.tag}[type="${field.type}"] name="${field.name}" id="${field.id}" placeholder="${field.placeholder}" label="${field.label}" aria-label="${field.ariaLabel}" data-field="${field.dataField}" data-name="${field.dataName}" class="${field.className}"`);
     });
 
-    // Also check for any fields that might contain "linkedin" or "github" in any attribute
-    const socialFields = fields.filter(field =>
-      field.name.toLowerCase().includes('linkedin') ||
-      field.name.toLowerCase().includes('github') ||
-      field.id.toLowerCase().includes('linkedin') ||
-      field.id.toLowerCase().includes('github') ||
-      field.placeholder.toLowerCase().includes('linkedin') ||
-      field.placeholder.toLowerCase().includes('github') ||
-      field.label.toLowerCase().includes('linkedin') ||
-      field.label.toLowerCase().includes('github') ||
-      field.ariaLabel.toLowerCase().includes('linkedin') ||
-      field.ariaLabel.toLowerCase().includes('github') ||
-      field.dataField.toLowerCase().includes('linkedin') ||
-      field.dataField.toLowerCase().includes('github') ||
-      field.dataName.toLowerCase().includes('linkedin') ||
-      field.dataName.toLowerCase().includes('github')
-    );
+    // Check for any fields that might contain common field type keywords in any attribute
+    const commonFieldTypes = ['linkedin', 'github', 'twitter', 'facebook', 'instagram', 'portfolio', 'website', 'url', 'phone', 'email', 'salary', 'experience', 'education', 'skills'];
+    const detectedFields = {};
 
-    if (socialFields.length > 0) {
-      log(`debug: found ${socialFields.length} potential social media fields:`);
-      socialFields.forEach(field => {
-        log(`  SOCIAL: ${field.tag}[type="${field.type}"] name="${field.name}" id="${field.id}" placeholder="${field.placeholder}" label="${field.label}"`);
+    commonFieldTypes.forEach(fieldType => {
+      const matchingFields = fields.filter(field =>
+        field.name.toLowerCase().includes(fieldType) ||
+        field.id.toLowerCase().includes(fieldType) ||
+        field.placeholder.toLowerCase().includes(fieldType) ||
+        field.label.toLowerCase().includes(fieldType) ||
+        field.ariaLabel.toLowerCase().includes(fieldType) ||
+        field.dataField.toLowerCase().includes(fieldType) ||
+        field.dataName.toLowerCase().includes(fieldType)
+      );
+
+      if (matchingFields.length > 0) {
+        detectedFields[fieldType] = matchingFields;
+      }
+    });
+
+    if (Object.keys(detectedFields).length > 0) {
+      log(`debug: found fields matching common types:`);
+      Object.entries(detectedFields).forEach(([fieldType, matchingFields]) => {
+        log(`  ${fieldType.toUpperCase()}: ${matchingFields.length} field(s)`);
+        matchingFields.forEach(field => {
+          log(`    ${field.tag}[type="${field.type}"] name="${field.name}" id="${field.id}" placeholder="${field.placeholder}" label="${field.label}"`);
+        });
       });
     } else {
-      log(`debug: no social media fields found with linkedin/github keywords`);
+      log(`debug: no fields found matching common field type keywords`);
     }
   } catch (e) {
     log(`debug: error analyzing form fields: ${e.message}`);
@@ -388,68 +441,54 @@ const FULLNAME_STRICT = [
   'input[name*="full_name"]', 'input[id*="full_name"]'
 ];
 
-// Generic form field selectors
+// Helper function to generate selectors for any field type
+function generateFieldSelectors(fieldType, variations = []) {
+  const baseSelectors = [
+    `input[name*="${fieldType}" i]`,
+    `input[id*="${fieldType}" i]`,
+    `input[placeholder*="${fieldType}" i]`,
+    `input[data-field*="${fieldType}" i]`,
+    `input[data-name*="${fieldType}" i]`
+  ];
+
+  // Add variations (e.g., "linked_in", "git_hub", etc.)
+  variations.forEach(variation => {
+    baseSelectors.push(
+      `input[name*="${variation}" i]`,
+      `input[id*="${variation}" i]`,
+      `input[placeholder*="${variation}" i]`,
+      `input[data-field*="${variation}" i]`,
+      `input[data-name*="${variation}" i]`
+    );
+  });
+
+  return baseSelectors;
+}
+
+// Generic form field selectors - now using the helper function for consistency
 const GENERIC_SELECTORS = {
   email: [
     'input[type="email"]',
-    'input[name*="email" i]',
-    'input[id*="email" i]',
-    'input[placeholder*="email" i]'
+    ...generateFieldSelectors('email')
   ],
   phone: [
     'input[type="tel"]',
-    'input[name*="phone" i]',
-    'input[id*="phone" i]',
-    'input[placeholder*="phone" i]',
-    'input[name*="mobile" i]',
-    'input[id*="mobile" i]'
+    ...generateFieldSelectors('phone', ['mobile', 'telephone'])
   ],
   salary: [
-    'input[name*="salary" i]',
-    'input[id*="salary" i]',
-    'input[placeholder*="salary" i]',
+    ...generateFieldSelectors('salary'),
     'select[name*="salary" i]',
     'select[id*="salary" i]'
   ],
-  linkedin: [
-    'input[name*="linkedin" i]',
-    'input[id*="linkedin" i]',
-    'input[placeholder*="linkedin" i]',
-    'input[name*="linked_in" i]',
-    'input[id*="linked_in" i]',
-    'input[name*="social_linkedin" i]',
-    'input[id*="social_linkedin" i]',
-    'input[name*="profile_linkedin" i]',
-    'input[id*="profile_linkedin" i]',
-    'input[name*="url_linkedin" i]',
-    'input[id*="url_linkedin" i]',
-    'input[data-field*="linkedin" i]',
-    'input[data-name*="linkedin" i]'
-  ],
-  github: [
-    'input[name*="github" i]',
-    'input[id*="github" i]',
-    'input[placeholder*="github" i]',
-    'input[name*="git_hub" i]',
-    'input[id*="git_hub" i]',
-    'input[name*="social_github" i]',
-    'input[id*="social_github" i]',
-    'input[name*="profile_github" i]',
-    'input[id*="profile_github" i]',
-    'input[name*="url_github" i]',
-    'input[id*="url_github" i]',
-    'input[data-field*="github" i]',
-    'input[data-name*="github" i]'
-  ],
-  website: [
-    'input[name*="website" i]',
-    'input[id*="website" i]',
-    'input[placeholder*="website" i]',
-    'input[name*="portfolio" i]',
-    'input[id*="portfolio" i]',
-    'input[name*="url" i]',
-    'input[id*="url" i]'
-  ]
+  linkedin: generateFieldSelectors('linkedin', ['linked_in', 'social_linkedin', 'profile_linkedin', 'url_linkedin']),
+  github: generateFieldSelectors('github', ['git_hub', 'social_github', 'profile_github', 'url_github']),
+  website: generateFieldSelectors('website', ['portfolio', 'url', 'homepage']),
+  twitter: generateFieldSelectors('twitter', ['social_twitter', 'profile_twitter', 'url_twitter']),
+  facebook: generateFieldSelectors('facebook', ['social_facebook', 'profile_facebook', 'url_facebook']),
+  instagram: generateFieldSelectors('instagram', ['social_instagram', 'profile_instagram', 'url_instagram']),
+  experience: generateFieldSelectors('experience', ['work_experience', 'job_experience', 'professional_experience']),
+  education: generateFieldSelectors('education', ['educational_background', 'academic_background']),
+  skills: generateFieldSelectors('skills', ['technical_skills', 'professional_skills', 'competencies'])
 };
 
 /* ---------------------------------- runner ---------------------------------- */
@@ -486,12 +525,14 @@ export async function runBatch(urls) {
         meta = await extractMeta(page);
         log(`meta: company="${meta.company}" title="${meta.title}" source=${meta.source}`);
 
-        // For dynamic forms, wait a bit longer for content loading
-        if (meta.source === 'Personio' || meta.source === 'Workday' || meta.source === 'Greenhouse') {
-          await page.waitForTimeout(2000);
-          log('dynamic: additional wait for form loading');
-          await debugFormFields(page);
+        // Wait for form stability - this works for any platform
+        const isStable = await waitForFormStability(page);
+        if (!isStable) {
+          log('form: form may still be loading, proceeding with current state');
         }
+
+        // Debug form fields to understand structure
+        await debugFormFields(page);
 
         /* -------- Names: prefer First+Last; only use Full name if both absent and full present -------- */
         const firstSel = await findFirstVisibleSelector(page, FIRST_SELECTORS, 'firstName');
@@ -571,6 +612,12 @@ export async function runBatch(urls) {
         status = 'filled';
         notes = 'form filled, waiting for manual submission and tab close';
         log('submit: form filled, user must manually submit and close tab');
+
+        // Show banner to guide user
+        await showHoldBanner(
+          page,
+          'EasyApply: Fill missing fields and submit. When done, CLOSE this tab to continue the batch.'
+        );
 
         // Wait for the page to be closed (user closes tab after submitting)
         try {
